@@ -2,7 +2,7 @@
 #![forbid(rust_2018_idioms)]
 #![warn(unreachable_pub, missing_debug_implementations)]
 #![allow(rustdoc::bare_urls)]
-#![doc = include_str!("../README.md")]
+#![cfg_attr(not(doctest), doc = include_str!("../README.md"))]
 
 pub use higher_derive::{Bifunctor, BifunctorRef, Functor, FunctorRef};
 
@@ -101,8 +101,35 @@ pub mod rings;
 /// ```text
 /// variable <= expression;
 /// ```
+/// 
+/// The left-hand-side of such expressions allows syntax similar, but not
+/// identical to closure arguments.
+/// Due to macro parser limitations, you need to surround the whole left-hand-side
+/// with parentheses if you want to do more than simple variable assignments.
+/// If you want both, a pattern-match and a type annotation, you may need to
+/// surround the pattern with extra parentheses (they need to be a valid token-tree):
+/// 
+/// ```rust
+/// # use higher::run;
+/// # use std::ops::Range;
+/// # run! (
+/// ((Range{start: a, end: b}) : Range<i32>) <= Some(1..3);
+/// # yield a
+/// # );
+/// ```
+/// 
+/// Without explicit type annotations, one pair of braces can be omitted.
+/// 
+/// ```rust
+/// # use higher::run;
+/// # use std::ops::Range;
+/// # run! (
+/// (Range{start: a, end: b}) <= Some(7..10);
+/// # yield a
+/// # );
+/// ```
 ///
-/// Expressions my be preceded with a list of values one wants to explicitly
+/// Expressions may be preceded with a list of values one wants to explicitly
 /// clone before entering the expression. You can think of it being akin to
 /// C++ capture-by-value, which also inspired the syntax:
 /// ```text
@@ -200,25 +227,29 @@ pub mod rings;
 macro_rules! run {
     //matching against a token tree, because a pattern cannot be followed by "<=".
     //To still get good error messages, a nested macro is used, that matches against pat.
+    (($binding:tt $(:$exp_ty:ty)?) <= <$coerce:ty> $comp:expr; $($tail:tt)*) => { run!{($binding $(:$exp_ty)?) <= [] <$coerce> $comp; $($tail)*} };
+    (($binding:tt $(:$exp_ty:ty)?) <= [$($shadow_clone:ident),*] <$coerce:ty> $comp:expr; $($tail:tt)*) => {
+        {
+            macro_rules! verify_pat { ($_:pat_param) => {}; } verify_pat!($binding);
+            $(let $shadow_clone = $shadow_clone.clone();)*
+            #[allow(unused_parens)]
+            $crate::Bind::bind::<$coerce, _>($comp, move |$binding $(: $exp_ty)?| run!($($tail)*))
+        }
+    };
     ($binding:tt <= <$coerce:ty> $comp:expr; $($tail:tt)*) => { run!{$binding <= [] <$coerce> $comp; $($tail)*} };
+    ($binding:tt <= [$($shadow_clone:ident),*] <$coerce:ty> $comp:expr; $($tail:tt)*) => { run!(($binding) <= [$($shadow_clone),*] <$coerce> $comp; $($tail)*) };
 
-    ($binding:tt <= [$($shadow_clone:ident),*] <$coerce:ty> $comp:expr; $($tail:tt)*) => {
+    (($binding:tt $(:$exp_ty:ty)?) <= $comp:expr; $($tail:tt)*) => { run!{($binding $(:$exp_ty)?) <= [] $comp; $($tail)*} };
+    (($binding:tt $(:$exp_ty:ty)?) <= [$($shadow_clone:ident),*] $comp:expr; $($tail:tt)*) => {
         {
             macro_rules! verify_pat { ($_:pat_param) => {}; } verify_pat!($binding);
             $(let $shadow_clone = $shadow_clone.clone();)*
-            $crate::Bind::bind::<$coerce, _>($comp, move |$binding| run!($($tail)*))
+            #[allow(unused_parens)]
+            $crate::Bind::bind($comp, move |$binding $(: $exp_ty)?| run!($($tail)*))
         }
     };
-
     ($binding:tt <= $comp:expr; $($tail:tt)*) => { run!{$binding <= [] $comp; $($tail)*} };
-
-    ($binding:tt <= [$($shadow_clone:ident),*] $comp:expr; $($tail:tt)*) => {
-        {
-            macro_rules! verify_pat { ($_:pat_param) => {}; } verify_pat!($binding);
-            $(let $shadow_clone = $shadow_clone.clone();)*
-            $crate::Bind::bind($comp, move |$binding| run!($($tail)*))
-        }
-    };
+    ($binding:tt <= [$($shadow_clone:ident),*] $comp:expr; $($tail:tt)*) => { run!(($binding) <= [$($shadow_clone),*] $comp; $($tail)*) };
 
     (<$coerce:ty> $comp:expr; $($tail:tt)*) => { run!{[] <$coerce> $comp; $($tail)*} };
 
@@ -384,6 +415,18 @@ mod test {
                 run!{yield t} //yield without explicit clone.
             },
             Some(NoCopy(6u32))
+        );
+
+        //Test patterns and explicit types
+        assert_eq!(
+            run! {
+                t <= Some(NoCopy(5u32));
+                ((g, u) : (u32, i32)) <= Some((2*t.0, -3)); //Destructuring pattern with explicit types
+                (NoCopy(tt)) <= [t] Some(t.clone()); // Destructuring pattern without explicit type, but with explicit clone
+                ((NoCopy(i)) : NoCopy<u32>) <= [t] <i32> Some(t); // Explicit type and coercion
+                yield ((i as i32) + (tt as i32) + (g as i32) + u)
+            },
+            Some(17)
         );
     }
 }
